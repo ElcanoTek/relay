@@ -1,0 +1,14 @@
+U
+USER
+15:30:47
+What is the capital of France?
+
+A
+ASSISTANT [THINKING]
+Model: gpt-4 - 15:30:50
+The user is asking a simple geography question. I know this one.
+
+A
+ASSISTANT
+Model: gpt-4 - 15:30:52
+The capital of France is Paris. It's located in the north-central part of the country and is known as the City of Light.
