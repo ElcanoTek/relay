@@ -11,7 +11,7 @@ import type { ParsedRun } from "./types.js";
  */
 export interface OpenRouterConfig {
   apiKey: string;
-  model?: string; // defaults to gpt-3.5-turbo via openrouter
+  model?: string; 
 }
 
 /**
@@ -54,7 +54,7 @@ export function toText(run: ParsedRun): string {
 
   if (run.warnings.length > 0) {
     lines.push("=== WARNINGS ===");
-    run.warnings.forEach((w) => lines.push(`  - ${w}`));
+    run.warnings.forEach((w: any) => lines.push(`  - ${w}`));
   }
 
   return lines.join("\n");
@@ -94,10 +94,10 @@ Question: ${question}`;
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${config.apiKey}`,
-        "HTTP-Referer": "https://github.com/relay/log-parser",
-        "X-Title": "Relay Log Parser",
+        Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/user/relay",
+        "X-Title": "Relay Log Parser",
       },
       body: JSON.stringify({
         model: config.model || "openai/gpt-3.5-turbo",
@@ -112,9 +112,17 @@ Question: ${question}`;
 
     if (!response.ok) {
       const error: any = await response.json();
-      throw new Error(
-        `OpenRouter API Error: ${error.error?.message || response.statusText}`
-      );
+      const errorMsg = error.error?.message || response.statusText || "Unknown error";
+      
+      if (errorMsg.includes("cookie") || errorMsg.includes("credentials")) {
+        throw new Error(
+          `OpenRouter Authentication Failed: ${errorMsg}\n` +
+          `Please verify your API key at: https://openrouter.ai/keys\n` +
+          `Your account may need a credit balance or valid payment method.`
+        );
+      }
+      
+      throw new Error(`OpenRouter API Error: ${errorMsg}`);
     }
 
     const data: any = await response.json();

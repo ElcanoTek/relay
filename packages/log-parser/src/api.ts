@@ -4,6 +4,7 @@
  */
 
 import { parseVictoriaLog } from "./parser.js";
+import { parseJsonLogRaw } from "./json-parser.js";
 import { validateParsedRun, enrichParsedRun } from "./validation.js";
 import { formatForLLM, formatForLLMCompact, type FormatOptions } from "./formatter.js";
 import type { ParsedRun, ParsedEvent } from "./types.js";
@@ -64,6 +65,14 @@ export function processLogRun(
  */
 export function parseLogRun(rawLog: string): ParsedRun {
   return parseVictoriaLog(rawLog);
+}
+
+/**
+ * Parse JSON log format directly (from API responses)
+ * Input can be JSON string or object
+ */
+export function parseJsonLog(jsonInput: string | any): ParsedRun {
+  return parseJsonLogRaw(jsonInput);
 }
 
 /**
