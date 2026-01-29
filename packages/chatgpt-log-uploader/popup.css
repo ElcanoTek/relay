@@ -1,0 +1,200 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #0c0712;
+  --panel: #1b1326;
+  --panel-strong: #261a34;
+  --text: #f2edf9;
+  --muted: #9a8bb2;
+  --accent: #7b6cff;
+  --accent-bright: #a49bff;
+  --border: #2f2340;
+  --success: #4dd59b;
+  --danger: #f06a6a;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top, #1a1026 0%, #0b0612 60%);
+  color: var(--text);
+  font-family: "Rajdhani", "Segoe UI", sans-serif;
+  width: 320px;
+}
+
+main {
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.title-bar {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.logo-ring {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid #3e2a57;
+  box-shadow: 0 0 12px rgba(123, 108, 255, 0.5);
+  position: relative;
+}
+
+.logo-ring::before,
+.logo-ring::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border: 1px solid rgba(123, 108, 255, 0.6);
+  border-radius: 6px;
+  transform: rotate(20deg);
+}
+
+.logo-ring::after {
+  inset: 11px;
+  border-radius: 4px;
+  transform: rotate(60deg);
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.panel {
+  background: linear-gradient(180deg, var(--panel-strong), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.field__control {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(12, 7, 18, 0.85);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+
+.file-picker {
+  border: 1px dashed #3b2d55;
+  border-radius: 12px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  display: block;
+  background: rgba(22, 14, 32, 0.8);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.file-picker:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(123, 108, 255, 0.25);
+}
+
+.file-picker input {
+  display: none;
+}
+
+.file-picker__label {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.actions {
+  display: grid;
+}
+
+button {
+  font: inherit;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: linear-gradient(135deg, var(--accent), #5a4ae3);
+  color: #0b0612;
+  border-color: #5b4ce0;
+  box-shadow: 0 0 16px rgba(123, 108, 255, 0.35);
+}
+
+.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent-bright), var(--accent));
+}
+
+.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.ghost:hover:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(123, 108, 255, 0.2);
+}
+
+.status {
+  min-height: 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+footer {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
