@@ -11,14 +11,25 @@
 import * as readline from "readline";
 import * as path from "path";
 import * as fs from "fs";
+import { fileURLToPath } from "url";
 import { parseJsonLog, askAboutLogs, POPULAR_MODELS } from "./index.js";
 import { queryLLMViaBrowser, checkBrowserOSConnection } from "./llm-browser.js";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 // Load .env file if it exists
-function loadEnvFile() {
-  // dist/ -> package root
-  const envPath = path.join(__dirname, "..", ".env");
-  if (fs.existsSync(envPath)) {
+function loadEnvFile(): string[] {
+  const envPaths = [
+    // dist/ -> package root
+    path.join(__dirname, "..", ".env"),
+    // dist/ -> repo root
+    path.join(__dirname, "..", "..", "..", ".env"),
+  ];
+
+  const loadedPaths: string[] = [];
+  for (const envPath of envPaths) {
+    if (!fs.existsSync(envPath)) continue;
     const envContent = fs.readFileSync(envPath, "utf-8");
     envContent.split("\n").forEach((line) => {
       const trimmed = line.trim();
@@ -28,10 +39,12 @@ function loadEnvFile() {
         if (key && value) process.env[key.trim()] = value.replace(/^["']|["']$/g, "");
       }
     });
+    loadedPaths.push(envPath);
   }
+  return loadedPaths;
 }
 
-loadEnvFile();
+const loadedEnvPaths = loadEnvFile();
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -49,6 +62,8 @@ function getConfig() {
   return {
     API_KEY: process.env.OPENROUTER_API_KEY,
     AUTH_TOKEN: process.env.LOG_AUTH_TOKEN,
+    CSRF_TOKEN: process.env.LOG_CSRF_TOKEN,
+    AUTH_COOKIE: process.env.LOG_AUTH_COOKIE,
     MODEL: process.env.LOG_MODEL || "openai/gpt-4-turbo",
     TASKS_API: process.env.LOG_TASKS_API || "https://moc.elcanotek.com/tasks",
     BASE_URL: process.env.LOG_BASE_URL || "https://moc.elcanotek.com/logs",
@@ -68,15 +83,113 @@ interface Task {
   status?: string;
 }
 
+interface TaskWithDerivedTitle extends Task {
+  _derivedTitle?: string;
+}
+
+function normalizeTitle(value?: string, maxLength = 80): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength - 3)}...`;
+}
+
+function getTaskDisplayTitle(task: Task): string {
+  const explicit = normalizeTitle(task.title) || normalizeTitle(task.name);
+  if (explicit) return explicit;
+  const desc = normalizeTitle(task.description, 60);
+  if (desc) return desc;
+  const derived = normalizeTitle((task as TaskWithDerivedTitle)._derivedTitle, 80);
+  if (derived) return derived;
+  if (task.id) return `Task ${task.id.slice(0, 8)}`;
+  return "Untitled";
+}
+
+function buildAuthHeaders(): Record<string, string> {
+  const { AUTH_TOKEN, CSRF_TOKEN, AUTH_COOKIE } = getConfig();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (AUTH_TOKEN) headers.Authorization = AUTH_TOKEN;
+  if (CSRF_TOKEN) headers["x-csrf-token"] = CSRF_TOKEN;
+  if (AUTH_COOKIE) headers.Cookie = AUTH_COOKIE;
+  return headers;
+}
+
+function deriveTitleFromLog(logJsonData: any): string | undefined {
+  const direct =
+    normalizeTitle(logJsonData?.title) ||
+    normalizeTitle(logJsonData?.name) ||
+    normalizeTitle(logJsonData?.task_title) ||
+    normalizeTitle(logJsonData?.taskName) ||
+    normalizeTitle(logJsonData?.task?.title) ||
+    normalizeTitle(logJsonData?.task?.name) ||
+    normalizeTitle(logJsonData?.task?.description) ||
+    normalizeTitle(logJsonData?.task?.prompt) ||
+    normalizeTitle(logJsonData?.prompt);
+  if (direct) return direct;
+
+  const messages =
+    (Array.isArray(logJsonData) && logJsonData) ||
+    logJsonData?.messages ||
+    logJsonData?.data?.messages ||
+    logJsonData?.log?.messages ||
+    logJsonData?.run?.messages ||
+    logJsonData?.payload?.messages ||
+    [];
+  if (!Array.isArray(messages)) return undefined;
+
+  const firstUser = messages.find(
+    (msg: any) => msg?.role === "user" && typeof msg?.content === "string"
+  );
+  const firstUserContent = firstUser?.content || logJsonData?.events?.find(
+    (evt: any) => evt?.role === "user" && typeof evt?.text === "string"
+  )?.text;
+  if (!firstUserContent) return undefined;
+
+  const lines = firstUserContent
+    .split("\n")
+    .map((line: string) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (lower.startsWith("you are ") && line.length < 60) continue;
+    if (lower.startsWith("important") || lower.startsWith("critical")) continue;
+    if (lower.startsWith("##")) continue;
+    const sentence = line.split(/[.!?]/)[0]?.trim() || "";
+    const candidate = normalizeTitle(sentence || line, 80);
+    if (candidate) return candidate;
+  }
+
+  return normalizeTitle(firstUserContent, 60);
+}
+
+async function enrichTasksWithDerivedTitles(tasks: Task[]): Promise<TaskWithDerivedTitle[]> {
+  const enriched: TaskWithDerivedTitle[] = [];
+  for (const task of tasks) {
+    const explicit = normalizeTitle(task.title) || normalizeTitle(task.name) || normalizeTitle(task.description);
+    if (explicit) {
+      enriched.push(task);
+      continue;
+    }
+
+    const logContent = await fetchTaskLog(task.id);
+    if (logContent) {
+      const derived = deriveTitleFromLog(logContent);
+      enriched.push({ ...task, _derivedTitle: derived });
+    } else {
+      enriched.push(task);
+    }
+  }
+  return enriched;
+}
+
 async function fetchTasks(): Promise<Task[]> {
   try {
     const { TASKS_API, AUTH_TOKEN, LIMIT } = getConfig();
     console.log(`\n🌐 Fetching tasks from: ${TASKS_API}`);
     const response = await fetch(`${TASKS_API}?limit=${LIMIT}&offset=0`, {
-      headers: {
-        Authorization: AUTH_TOKEN || "",
-        "Content-Type": "application/json",
-      },
+      headers: buildAuthHeaders(),
     });
 
     if (!response.ok) {
@@ -95,17 +208,14 @@ async function fetchTasks(): Promise<Task[]> {
 
 async function fetchTaskLog(taskId: string): Promise<any | null> {
   try {
-    const { AUTH_TOKEN, BASE_URL } = getConfig();
+    const { BASE_URL } = getConfig();
     const url = `${BASE_URL}/${taskId}`;
     const response = await fetch(url, {
-      headers: {
-        Authorization: AUTH_TOKEN || "",
-        "Content-Type": "application/json",
-      },
+      headers: buildAuthHeaders(),
     });
 
     if (!response.ok) {
-      console.error(`❌ Failed to fetch log: ${response.status}`);
+      console.error(`❌ Failed to fetch log for ${taskId}: ${response.status} ${response.statusText}`);
       return null;
     }
 
@@ -118,7 +228,7 @@ async function fetchTaskLog(taskId: string): Promise<any | null> {
 }
 
 function formatTaskForDisplay(task: Task, index: number): string {
-  const title = task.title || task.name || "Untitled";
+  const title = getTaskDisplayTitle(task);
   const created = task.created_at ? new Date(task.created_at).toLocaleString() : "N/A";
   const status = task.status ? ` [${task.status}]` : "";
   return `${index + 1}. ${title}${status} - ${created}`;
@@ -258,11 +368,12 @@ async function queryLog(logJsonData: any, taskTitle: string): Promise<void> {
   while (true) {
     const userQuestion = await question("Your question: ");
 
-    if (userQuestion.toLowerCase() === "exit" || userQuestion.toLowerCase() === "back") {
+    const normalizedQuestion = userQuestion.trim().toLowerCase();
+    if (normalizedQuestion === "exit" || normalizedQuestion === "back") {
       break;
     }
 
-    if (!userQuestion.trim()) {
+    if (!normalizedQuestion) {
       continue;
     }
 
@@ -303,8 +414,10 @@ async function main() {
 
   // Debug: Show environment status
   console.log("\n📋 Configuration Status:");
+  console.log(`  ✓ Loaded .env from: ${loadedEnvPaths.length ? loadedEnvPaths.join(", ") : "none"}`);
   console.log(`  ✓ OPENROUTER_API_KEY: ${API_KEY ? "✓ Set (" + API_KEY.substring(0, 10) + "...)" : "❌ Not set"}`);
   console.log(`  ✓ LOG_AUTH_TOKEN: ${AUTH_TOKEN ? "✓ Set" : "❌ Not set"}`);
+  console.log(`  ✓ LOG_CSRF_TOKEN: ${getConfig().CSRF_TOKEN ? "✓ Set" : "❌ Not set"}`);
   console.log(`  ✓ Tasks API: ${TASKS_API}`);
   console.log(`  ✓ Model: ${MODEL}\n`);
 
@@ -335,37 +448,40 @@ async function main() {
 
   console.log(`\n✓ Found ${tasks.length} tasks\n`);
 
+  const tasksWithTitles = await enrichTasksWithDerivedTitles(tasks);
+
   // Main loop
   while (true) {
     // Display tasks
     console.log("\n📋 Available Tasks:");
     console.log("-".repeat(60));
-    tasks.forEach((task, i) => {
+    tasksWithTitles.forEach((task, i) => {
       console.log(formatTaskForDisplay(task, i));
     });
     console.log("-".repeat(60));
 
-    const choice = await question("\nSelect task (1-" + tasks.length + ") or 'exit': ");
+    const choice = await question("\nSelect task (1-" + tasksWithTitles.length + ") or 'exit': ");
 
     // if (choice.toLowerCase() === "exit") {
     //   break;
     // }
 
-    if (choice.toLowerCase() === "exit") {
+    const normalizedChoice = choice.trim().toLowerCase();
+    if (normalizedChoice === "exit") {
         console.log("\n👋 Goodbye!");
         rl.close();
         return;
     }
 
 
-    const taskIndex = parseInt(choice, 10) - 1;
+    const taskIndex = parseInt(normalizedChoice, 10) - 1;
 
-    if (taskIndex < 0 || taskIndex >= tasks.length) {
+    if (taskIndex < 0 || taskIndex >= tasksWithTitles.length) {
       console.log("❌ Invalid selection");
       continue;
     }
 
-    const selectedTask = tasks[taskIndex];
+    const selectedTask = tasksWithTitles[taskIndex];
     console.log(`\n⏳ Fetching log for: ${selectedTask.title || selectedTask.name || "Unknown"}...`);
 
     const logContent = await fetchTaskLog(selectedTask.id);
@@ -375,8 +491,15 @@ async function main() {
       continue;
     }
 
+    const baseTitle = getTaskDisplayTitle(selectedTask);
+    const derivedTitle = deriveTitleFromLog(logContent);
+    const finalTitle =
+      normalizeTitle(selectedTask.title) || normalizeTitle(selectedTask.name)
+        ? baseTitle
+        : derivedTitle || baseTitle;
+
     // Query the log
-    await queryLog(logContent, selectedTask.title || selectedTask.name || selectedTask.id);
+    await queryLog(logContent, finalTitle);
   }
 
   console.log("\n👋 Goodbye!");
@@ -387,3 +510,5 @@ main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
+
+
