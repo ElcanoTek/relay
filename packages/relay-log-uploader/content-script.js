@@ -1,3 +1,6 @@
+﻿const MOC_HOST = "moc.elcanotek.com";
+const IS_MOC = window.location.hostname.includes(MOC_HOST);
+
 function findFileInput(root = document) {
   return root.querySelector('input[type="file"]');
 }
@@ -73,7 +76,6 @@ function tryClickUploadTriggers(provider) {
     if (!label) continue;
     if (label.includes("new chat") || label.includes("new conversation")) continue;
     if (provider === "gemini" && geminiUploadClicked) {
-      // Once we hit Upload files, stop spamming other Gemini controls.
       return false;
     }
 
@@ -131,7 +133,7 @@ function waitForFileInput(timeoutMs = 12000, intervalMs = 300) {
 
 function findComposer() {
   return (
-    document.querySelector('textarea') ||
+    document.querySelector("textarea") ||
     document.querySelector('[contenteditable="true"]') ||
     document.querySelector('[role="textbox"]')
   );
@@ -168,6 +170,240 @@ function canHandleUpload(provider) {
   return false;
 }
 
+let mocHookRequested = false;
+
+function requestMocHook() {
+  if (mocHookRequested) return;
+  mocHookRequested = true;
+  chrome.runtime.sendMessage({ type: "MOC_INJECT_HOOK" });
+}
+
+if (IS_MOC) {
+  setupMocRelay();
+}
+
+let mocLastLogsUrl = null;
+let mocLastLogsText = null;
+let mocLastLogsType = "application/json";
+let mocLastLogsTaskId = null;
+let mocStatusEl = null;
+let mocSendButton = null;
+let mocDownloadButton = null;
+
+function setupMocRelay() {
+  injectRelayStyles();
+  requestMocHook();
+  observeMocDom();
+  window.addEventListener("message", handleMocMessage);
+}
+
+function observeMocDom() {
+  const observer = new MutationObserver(() => {
+    tryInjectMocButton();
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  tryInjectMocButton();
+}
+
+function injectRelayStyles() {
+  if (document.getElementById("relay-moc-style")) return;
+  const style = document.createElement("style");
+  style.id = "relay-moc-style";
+  style.textContent = `
+    .relay-moc-button {
+      margin-left: 8px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(135deg, #8fd6ff, #6ab7ff);
+      color: #0b1525;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .relay-moc-button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .relay-moc-status {
+      margin-left: 10px;
+      font-size: 11px;
+      color: #b9c5ff;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function tryInjectMocButton() {
+  const downloadBtn = findDownloadLogsButton();
+  if (!downloadBtn) return;
+
+  if (mocSendButton && mocSendButton.isConnected) {
+    return;
+  }
+
+  mocDownloadButton = downloadBtn;
+  mocLastLogsTaskId = downloadBtn.getAttribute("data-task-id") || null;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Send to Relay";
+  button.className = "relay-moc-button";
+  button.addEventListener("click", () => {
+    handleSendToRelayClick();
+  });
+
+  const status = document.createElement("span");
+  status.className = "relay-moc-status";
+  status.textContent = "";
+
+  mocSendButton = button;
+  mocStatusEl = status;
+
+  downloadBtn.insertAdjacentElement("afterend", status);
+  downloadBtn.insertAdjacentElement("afterend", button);
+}
+
+function setMocStatus(message, isError = false) {
+  if (!mocStatusEl) return;
+  mocStatusEl.textContent = message;
+  mocStatusEl.style.color = isError ? "#f7b2b2" : "#b9c5ff";
+}
+
+function findDownloadLogsButton() {
+  const direct = document.querySelector("button.download-logs-btn[data-task-id]");
+  if (direct) return direct;
+  const candidates = Array.from(
+    document.querySelectorAll('button, [role="button"], a, [data-action]')
+  );
+  for (const el of candidates) {
+    const text = (el.textContent || "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (text.includes("download logs")) {
+      return el;
+    }
+  }
+  return null;
+}
+
+function extractUrlFromElement(el) {
+  if (!el) return null;
+  if (el.href) return el.href;
+  const dataUrl = el.getAttribute("data-url") || el.getAttribute("data-href");
+  return dataUrl || null;
+}
+
+function buildMocFilename() {
+  if (mocLastLogsTaskId) {
+    return `task-${mocLastLogsTaskId}-logs.json`;
+  }
+  if (mocLastLogsUrl) {
+    const parts = mocLastLogsUrl.split("/").filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) {
+      return `task-${last}-logs.json`;
+    }
+  }
+  return "moc-logs.json";
+}
+
+async function handleSendToRelayClick() {
+  if (!mocSendButton) return;
+  mocSendButton.disabled = true;
+  setMocStatus("Preparing logs...");
+
+  try {
+    const provider = await getStoredProvider();
+
+    mocLastLogsText = null;
+    mocLastLogsType = "application/json";
+
+    const url = mocLastLogsUrl || extractUrlFromElement(mocDownloadButton);
+    if (url) {
+      mocLastLogsUrl = url;
+    }
+
+    if (mocDownloadButton) {
+      mocDownloadButton.click();
+    }
+
+    const payload = await waitForLogsPayload(8000);
+    if (!payload) {
+      setMocStatus("Could not capture logs. Click Download Logs once, then try again.", true);
+      return;
+    }
+
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(payload.text || "");
+    const files = [
+      {
+        name: buildMocFilename(),
+        type: payload.type || "application/json",
+        lastModified: Date.now(),
+        data: Array.from(bytes)
+      }
+    ];
+
+    const response = await chrome.runtime.sendMessage({
+      type: "OPEN_AND_UPLOAD",
+      files,
+      provider
+    });
+
+    if (response?.ok) {
+      setMocStatus("Opened provider and sent logs.");
+    } else {
+      setMocStatus(response?.error || "Failed to send logs.", true);
+    }
+  } catch (error) {
+    setMocStatus(error.message || "Failed to send logs.", true);
+  } finally {
+    mocSendButton.disabled = false;
+  }
+}
+
+function waitForLogsPayload(timeoutMs) {
+  return new Promise((resolve) => {
+    if (mocLastLogsText) {
+      resolve({ text: mocLastLogsText, type: mocLastLogsType });
+      return;
+    }
+
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (mocLastLogsText) {
+        clearInterval(timer);
+        resolve({ text: mocLastLogsText, type: mocLastLogsType });
+        return;
+      }
+      if (Date.now() - start > timeoutMs) {
+        clearInterval(timer);
+        resolve(null);
+      }
+    }, 200);
+  });
+}
+
+function handleMocMessage(event) {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== "relay-moc") return;
+
+  if (data.type === "LOGS_URL") {
+    mocLastLogsUrl = data.url;return;
+  }
+
+  if (data.type === "LOGS_PAYLOAD") {
+    mocLastLogsUrl = data.url || mocLastLogsUrl;
+    mocLastLogsText = data.text || null;
+    mocLastLogsType = data.contentType || "application/json";}
+}
+
+async function getStoredProvider() {
+  const stored = await chrome.storage.sync.get({ provider: "chatgpt" });
+  return stored.provider || "chatgpt";
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "PING") {
     sendResponse({ ok: true });
@@ -191,6 +427,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  sendResponse({ ok: false, error: 'Unsupported message.' });
+  sendResponse({ ok: false, error: "Unsupported message." });
   return true;
 });
+

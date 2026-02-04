@@ -26,8 +26,12 @@
         </label>
 
         <label class="file-picker">
-          <input id="logFiles" type="file" accept=".json,.jsonl,.log,.txt" multiple />
+          <input id="logFiles" type="file" accept=".json,.jsonl,.ndjson,.log,.txt" multiple />
           <span class="file-picker__label">Choose log files</span>
+        </label>
+        <label class="toggle">
+          <input id="includeNonJson" type="checkbox" />
+          <span>Include .log/.txt files</span>
         </label>
         <div id="fileSummary" class="muted">No files selected.</div>
 
