@@ -1,4 +1,4 @@
-* {
+﻿* {
   box-sizing: border-box;
 }
 
@@ -165,6 +165,47 @@ header p {
   display: grid;
 }
 
+.prompt-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(12, 7, 18, 0.6);
+}
+
+.prompt-card summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.prompt-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.prompt-card summary::after {
+  content: " v";
+  float: right;
+  color: var(--muted);
+}
+
+.prompt-card[open] summary::after {
+  content: " ^";
+}
+
+.prompt-input {
+  min-height: 90px;
+  font-size: 11px;
+  line-height: 1.4;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  resize: vertical;
+}
+
 button {
   font: inherit;
   border-radius: 10px;
@@ -175,6 +216,7 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
+
 
 button:disabled {
   opacity: 0.45;
@@ -215,3 +257,5 @@ footer {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+
+

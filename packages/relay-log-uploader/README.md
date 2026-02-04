@@ -13,6 +13,7 @@ Minimal Chromium extension that uploads local JSON logs to ChatGPT, Gemini, or C
 - Uploading relies on finding a file input in the provider UI; if it changes, the extension may need updates.
 - Large files may hit Chrome message size limits; use fewer files or the paste fallback.
 - By default, only JSON files are uploaded; enable the toggle to include .log/.txt files.
+- Enable “Include review prompt” to insert a standardized feedback prompt after upload. Turn on “Auto-send prompt” to submit it automatically.
 
 ## Files
 - `manifest.json` - MV3 manifest

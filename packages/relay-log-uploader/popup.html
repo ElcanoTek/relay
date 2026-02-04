@@ -35,6 +35,19 @@
         </label>
         <div id="fileSummary" class="muted">No files selected.</div>
 
+        <details class="prompt-card">
+          <summary class="prompt-summary">Review prompt</summary>
+          <label class="toggle">
+            <input id="includePrompt" type="checkbox" />
+            <span>Include review prompt</span>
+          </label>
+          <label class="toggle">
+            <input id="autoSendPrompt" type="checkbox" />
+            <span>Auto-send prompt</span>
+          </label>
+          <textarea id="reviewPrompt" class="field__control prompt-input" rows="6" spellcheck="false"></textarea>
+        </details>
+
         <div class="actions">
           <button id="uploadBtn" class="primary" disabled>Open new chat + upload</button>
         </div>

@@ -195,15 +195,257 @@ async function retrySendFiles(tabId, files, provider) {
   return { ok: false, error: lastError };
 }
 
+const DEFAULT_REVIEW_PROMPT = `You are reviewing an agent interaction log. Provide structured, actionable feedback.
+
+Output format (use these exact headings):
+1) Executive Summary
+- 3 bullets max.
+2) Strengths
+- Specific behaviors that were good.
+3) Issues / Risks
+- Concrete problems, with evidence from the log.
+4) Missed Opportunities
+- Things the agent should have done but didn't.
+5) Suggested Improvements
+- Actionable steps (numbered), prioritized.
+6) Checklist for Next Run
+- Short checklist to guide the next attempt.
+
+Failure Detection & Explanation (mandatory):
+- ONLY produce a Failure Analysis Report if there is explicit log evidence of failure.
+- If failure evidence exists, append a "Failure Analysis Report" after the normal sections (do not replace them).
+- Failure Analysis Report must include:
+  failure_stage (one of: discovery, download, normalization, analysis, reconciliation, reporting, delivery)
+  failure_type (one of: no_matching_reports, incorrect_report_type, missing_date_coverage, tool_call_error, schema_mismatch, reconciliation_failure, execution_timeout, logic_violation, unknown)
+  evidence (quote exact log lines/tool outputs)
+  root_cause_hypothesis (clearly mark hypotheses vs confirmed facts)
+  impact_assessment
+  remediation_steps
+
+Constraints:
+- Cite evidence by quoting short snippets (max 1 sentence each).
+- Do not infer or invent causes.
+- If the log is incomplete, say so and what is missing.
+- Keep total length under 400 words.`;
+
+async function loadPromptSettings() {
+  const stored = await chrome.storage.sync.get({
+    includePrompt: true,
+    reviewPrompt: "",
+    autoSendPrompt: false
+  });
+  const rawPrompt = (stored.reviewPrompt || "").trim();
+  const includePrompt = stored.includePrompt || rawPrompt.length > 0;
+  return {
+    prompt: includePrompt ? (rawPrompt || DEFAULT_REVIEW_PROMPT) : "",
+    autoSendPrompt: stored.autoSendPrompt === true,
+    includePrompt
+  };
+}
+
+async function sendPromptToTab(tabId, prompt, autoSend) {
+  if (!prompt) return { ok: true };
+  const message = { type: "INSERT_PROMPT", prompt, autoSend };
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    for (const frame of frames) {
+      const response = await new Promise((resolve) => {
+        chrome.tabs.sendMessage(tabId, message, { frameId: frame.frameId }, (resp) => {
+          if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+          }
+          resolve(resp);
+        });
+      });
+      if (response?.ok) {
+        return response;
+      }
+    }
+  } catch (_error) {
+    // ignore and fall back
+  }
+  return chrome.tabs.sendMessage(tabId, message);
+}
+
+async function injectPromptWithScripting(tabId, prompt, autoSend) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    world: "MAIN",
+    func: async (promptText, shouldSend) => {
+      const selectors = [
+        '[data-testid="prompt-textarea"]',
+        'textarea[placeholder*="Message"]',
+        'textarea[aria-label*="Message"]',
+        'textarea',
+        'div[contenteditable="true"]',
+        '[contenteditable="true"]',
+        '[role="textbox"]',
+        '[aria-label*="Message"]'
+      ];
+
+      const findInShadow = (root) => {
+        if (!root) return null;
+        for (const sel of selectors) {
+          const hit = root.querySelector?.(sel);
+          if (hit) return hit;
+        }
+        const candidates = root.querySelectorAll
+          ? root.querySelectorAll('[contenteditable="true"],[role="textbox"],textarea,[aria-label]')
+          : [];
+        for (const node of candidates) {
+          const label = (node.getAttribute?.("aria-label") || "").toLowerCase();
+          if (label.includes("message")) return node;
+        }
+        const walker = root.querySelectorAll ? root.querySelectorAll("*") : [];
+        for (const node of walker) {
+          if (node.shadowRoot) {
+            const found = findInShadow(node.shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+
+      const summarizeMatches = () => {
+        const summary = selectors.map((sel) => {
+          const nodes = Array.from(document.querySelectorAll(sel));
+          return `${sel}: ${nodes.length}`;
+        });
+        const editableCount = document.querySelectorAll('[contenteditable="true"]').length;
+        const textboxCount = document.querySelectorAll('[role="textbox"]').length;
+        summary.push(`[contenteditable="true"]: ${editableCount}`);
+        summary.push(`[role="textbox"]: ${textboxCount}`);
+        return summary.join("\n");
+      };
+
+      const setOverlay = () => {};
+
+      const waitForComposer = async (timeoutMs = 15000, intervalMs = 300) => {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          const composer =
+            selectors.map((sel) => document.querySelector(sel)).find(Boolean) ||
+            findInShadow(document) ||
+            null;
+          const active = document.activeElement;
+          const activeMatches =
+            active &&
+            (active.tagName === "TEXTAREA" ||
+              active.tagName === "INPUT" ||
+              active.getAttribute?.("contenteditable") === "true" ||
+              active.getAttribute?.("role") === "textbox" ||
+              (active.getAttribute?.("aria-label") || "").toLowerCase().includes("message"))
+              ? active
+              : null;
+          if (composer && composer.isConnected && !composer.disabled) {
+            return composer;
+          }
+          if (activeMatches && activeMatches.isConnected && !activeMatches.disabled) {
+            return activeMatches;
+          }
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+        return null;
+      };
+
+      setOverlay();
+      const composer = await waitForComposer();
+      if (!composer) {
+        return { ok: false, error: "Composer not found." };
+      }
+
+      let matchedSelector = "shadow";
+      for (const sel of selectors) {
+        if (document.querySelector(sel) === composer) {
+          matchedSelector = sel;
+          break;
+        }
+      }
+
+      try {
+        if (composer.tagName === "TEXTAREA" || composer.tagName === "INPUT") {
+          const proto = composer.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) {
+            setter.call(composer, promptText);
+          } else {
+            composer.value = promptText;
+          }
+        } else {
+          composer.textContent = promptText;
+        }
+        composer.dispatchEvent(new Event("input", { bubbles: true }));
+        composer.dispatchEvent(new Event("change", { bubbles: true }));
+        composer.focus();
+      } catch (error) {
+        return { ok: false, error: error?.message || "Failed to set prompt." };
+      }
+
+      if (!shouldSend) {
+        return { ok: true };
+      }
+
+      const sendButton =
+        document.querySelector('button[data-testid="send-button"]') ||
+        document.querySelector('button[aria-label="Send prompt"]') ||
+        document.querySelector('button[aria-label="Send message"]') ||
+        document.querySelector('button[aria-label="Send"]');
+
+      if (sendButton && !sendButton.disabled) {
+        sendButton.click();
+        return { ok: true };
+      }
+
+      // Fallback: try Enter key
+      composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+      composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+      return { ok: true };
+    },
+    args: [prompt, autoSend]
+  });
+
+  const result = results?.[0]?.result;
+  return result || { ok: false, error: "Prompt injection failed." };
+}
+
+async function retrySendPrompt(tabId, prompt, autoSend) {
+  const start = Date.now();
+  const timeoutMs = 15000;
+  let lastError = "Prompt insert failed.";
+  while (Date.now() - start < timeoutMs) {
+    const result = await sendPromptToTab(tabId, prompt, autoSend);
+    if (result?.ok) {
+      return result;
+    }
+    const injected = await injectPromptWithScripting(tabId, prompt, autoSend);
+    if (injected?.ok) {
+      return injected;
+    }
+    lastError = injected?.error || result?.error || lastError;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  return { ok: false, error: lastError };
+}
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "OPEN_AND_UPLOAD") {
     const files = message.files || [];
     const provider = message.provider || "chatgpt";
+    const prompt = message.prompt || "";
+    const autoSendPrompt = message.autoSendPrompt === true;
+    const includePrompt = message.includePrompt === true;
 
     (async () => {
       try {
         const tab = await openProviderTab(provider);
         const result = await retrySendFiles(tab.id, files, provider);
+        const promptSettings = prompt
+          ? { prompt, autoSendPrompt, includePrompt }
+          : await loadPromptSettings();
+        if (promptSettings.prompt) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await retrySendPrompt(tab.id, promptSettings.prompt, promptSettings.autoSendPrompt);
+        }
         sendResponse({ ok: true, result });
       } catch (error) {
         sendResponse({ ok: false, error: error.message || "Failed to open provider." });
@@ -215,6 +457,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "OPEN_AND_UPLOAD_FROM_URL") {
     const provider = message.provider || "chatgpt";
     const url = message.url;
+    const overridePrompt = (message.prompt || "").trim();
+    const overrideAutoSend = message.autoSendPrompt === true;
     if (!url) {
       sendResponse({ ok: false, error: "No URL provided." });
       return true;
@@ -223,8 +467,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       try {
         const files = await fetchFileAsPayload(url);
+        const promptSettings = overridePrompt
+          ? { prompt: overridePrompt, autoSendPrompt: overrideAutoSend, includePrompt: true }
+          : await loadPromptSettings();
         const tab = await openProviderTab(provider);
         const result = await retrySendFiles(tab.id, files, provider);
+        if (promptSettings.prompt) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await retrySendPrompt(tab.id, promptSettings.prompt, promptSettings.autoSendPrompt);
+        }
         sendResponse({ ok: true, result });
       } catch (error) {
         sendResponse({ ok: false, error: error.message || "Failed to fetch URL." });

@@ -133,10 +133,205 @@ function waitForFileInput(timeoutMs = 12000, intervalMs = 300) {
 
 function findComposer() {
   return (
+    document.querySelector('[data-testid="prompt-textarea"]') ||
     document.querySelector("textarea") ||
     document.querySelector('[contenteditable="true"]') ||
     document.querySelector('[role="textbox"]')
   );
+}
+
+function getComposerCandidates() {
+  const selectors = [
+    '[data-testid="prompt-textarea"]',
+    'textarea[placeholder*="Message"]',
+    'textarea[aria-label*="Message"]',
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    '[aria-label*="Message"]'
+  ];
+  const nodes = selectors.flatMap((sel) => Array.from(document.querySelectorAll(sel)));
+  return Array.from(new Set(nodes));
+}
+
+function pickBestComposer() {
+  const candidates = getComposerCandidates();
+  let best = null;
+  let bestArea = 0;
+  for (const node of candidates) {
+    if (!isComposerReady(node)) continue;
+    const rect = node.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > bestArea) {
+      bestArea = area;
+      best = node;
+    }
+  }
+  return best;
+}
+
+function summarizeComposerMatches() {
+  const selectors = [
+    '[data-testid="prompt-textarea"]',
+    'textarea[placeholder*="Message"]',
+    'textarea[aria-label*="Message"]',
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    '[aria-label*="Message"]'
+  ];
+  const summary = selectors.map((sel) => {
+    const count = document.querySelectorAll(sel).length;
+    return `${sel}: ${count}`;
+  });
+  return summary.join("\n");
+}
+
+function findComposerDeep() {
+  const direct = findComposer();
+  if (direct) return direct;
+
+  const walk = (node) => {
+    if (!node) return null;
+    if (node.shadowRoot) {
+      const found = node.shadowRoot.querySelector("textarea, [contenteditable=\"true\"], [role=\"textbox\"]");
+      if (found) return found;
+    }
+    for (const child of node.children || []) {
+      const found = walk(child);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return walk(document.body);
+}
+
+function setComposerValue(composer, text) {
+  if (!composer) return false;
+  if (composer.tagName === "TEXTAREA" || composer.tagName === "INPUT") {
+    const setter = Object.getOwnPropertyDescriptor(
+      composer.tagName === "TEXTAREA"
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype,
+      "value"
+    )?.set;
+    if (setter) {
+      setter.call(composer, text);
+    } else {
+      composer.value = text;
+    }
+    composer.dispatchEvent(new Event("input", { bubbles: true }));
+    composer.dispatchEvent(new Event("change", { bubbles: true }));
+    composer.focus();
+    return true;
+  }
+
+  composer.focus();
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(composer);
+    range.deleteContents();
+  } catch (_error) {
+    // ignore
+  }
+
+  const inserted = document.execCommand && document.execCommand("insertText", false, text);
+  if (!inserted) {
+    composer.textContent = text;
+  }
+
+  composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+  return true;
+}
+
+function findSendButton() {
+  return (
+    document.querySelector('button[data-testid="send-button"]') ||
+    document.querySelector('button[aria-label="Send prompt"]') ||
+    document.querySelector('button[aria-label="Send message"]') ||
+    document.querySelector('button[aria-label="Send"]')
+  );
+}
+
+async function clickSendButton(timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const btn = findSendButton();
+    if (btn && !btn.disabled) {
+      btn.click();
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+function triggerSend(composer) {
+  if (!composer) return false;
+  const eventInit = {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 13,
+    which: 13,
+    bubbles: true,
+    cancelable: true
+  };
+  composer.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+  composer.dispatchEvent(new KeyboardEvent("keypress", eventInit));
+  composer.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+  return true;
+}
+
+async function insertPromptWithRetry(prompt, autoSend, attempts = 5) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const composer = await waitForComposer(6000, 250);
+      composer.click();
+      const ok = setComposerValue(composer, prompt || "");
+      if (ok) {
+        if (autoSend) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          const sent = await clickSendButton(15000);
+          if (!sent) {
+            triggerSend(composer);
+          }
+        }
+        return { ok: true };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return { ok: false, error: lastError?.message || "Prompt insert failed." };
+}
+
+function isComposerReady(composer) {
+  if (!composer || !composer.isConnected) return false;
+  if (composer.disabled) return false;
+  const style = window.getComputedStyle(composer);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  return true;
+}
+
+function waitForComposer(timeoutMs = 12000, intervalMs = 300) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const composer = pickBestComposer() || findComposerDeep();
+      if (composer && isComposerReady(composer)) {
+        clearInterval(timer);
+        resolve(composer);
+        return;
+      }
+      if (Date.now() - start > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error("No composer found on the provider."));
+      }
+    }, intervalMs);
+  });
 }
 
 function buildDataTransfer(filePayloads) {
@@ -422,6 +617,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse(result);
       } catch (error) {
         sendResponse({ ok: false, error: error.message || "Upload failed." });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === "INSERT_PROMPT") {
+    (async () => {
+      try {
+        const result = await insertPromptWithRetry(message.prompt || "", message.autoSend);
+        sendResponse(result);
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message || "Prompt insert failed." });
       }
     })();
     return true;
