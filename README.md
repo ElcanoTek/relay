@@ -2,7 +2,9 @@
 
 Relay is a lightweight Chromium extension for uploading local logs into ChatGPT, Gemini, or Claude for analysis.
 
-![Relay workflow view](docs/images/MOCWorkflow.png)
+<img src="docs/images/MOCGif.gif" alt="MOC workflow" width="1200" />
+
+MOC workflow demo showing a full task run and results summary.
 
 ## Why Relay
 - Fast path from local logs to LLM analysis.
@@ -10,7 +12,9 @@ Relay is a lightweight Chromium extension for uploading local logs into ChatGPT,
 - Keeps uploads local to your browser session.
 
 ## Screenshots
-![Relay extension popup](docs/images/RelayPopup.png)
+<img src="docs/images/POPUPGIF.gif" alt="Popup file explorer workflow" width="1200" />
+
+Popup workflow demo showing provider selection and file upload flow.
 
 ## Repository layout
 - `packages/relay-log-uploader` - The MV3 extension source
