@@ -9,7 +9,7 @@ MOC workflow demo showing a full task run and results summary.
 ## Why Relay
 - Fast path from local logs to LLM analysis.
 - Works across multiple providers with one workflow.
-- Keeps uploads local to your browser session.
+- Uploads go directly to the selected provider (no Relay backend).
 
 ## Screenshots
 <img src="docs/images/POPUPGIF.gif" alt="Popup file explorer workflow" width="1200" />
