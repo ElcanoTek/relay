@@ -251,6 +251,17 @@ button:disabled {
   color: var(--muted);
 }
 
+.warning {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(240, 106, 106, 0.5);
+  background: rgba(240, 106, 106, 0.12);
+  color: #f2b1b1;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 footer {
   color: var(--muted);
   font-size: 10px;

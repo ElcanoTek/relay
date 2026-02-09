@@ -508,7 +508,10 @@ async function handleSendToRelayClick() {
   setMocStatus("Preparing logs...");
 
   try {
-    const provider = await getStoredProvider();
+    const { provider, uploadTarget, includePrompt, autoSendPrompt, reviewPrompt } = await getStoredRelaySettings();
+    const resolvedTarget = uploadTarget === "recent" ? "recent" : "new";
+    const promptText = includePrompt ? (reviewPrompt || "") : "";
+    const focusTab = resolvedTarget !== "new" || includePrompt || autoSendPrompt;
 
     mocLastLogsText = null;
     mocLastLogsType = "application/json";
@@ -542,11 +545,26 @@ async function handleSendToRelayClick() {
     const response = await chrome.runtime.sendMessage({
       type: "OPEN_AND_UPLOAD",
       files,
-      provider
+      provider,
+      uploadTarget: resolvedTarget,
+      reuseRecentTab: resolvedTarget === "recent",
+      focusTab,
+      skipPrompt: includePrompt === false,
+      prompt: promptText,
+      autoSendPrompt: includePrompt ? autoSendPrompt : false,
+      includePrompt: includePrompt === true
     });
 
     if (response?.ok) {
-      setMocStatus("Opened provider and sent logs.");
+      if (resolvedTarget === "recent") {
+        if (response.openedNew) {
+          setMocStatus("No provider tab found. Opened a new chat and sent logs.");
+        } else {
+          setMocStatus("Sent logs to your most recent provider chat.");
+        }
+      } else {
+        setMocStatus("Opened a new chat and sent logs.");
+      }
     } else {
       setMocStatus(response?.error || "Failed to send logs.", true);
     }
@@ -594,9 +612,21 @@ function handleMocMessage(event) {
     mocLastLogsType = data.contentType || "application/json";}
 }
 
-async function getStoredProvider() {
-  const stored = await chrome.storage.sync.get({ provider: "chatgpt" });
-  return stored.provider || "chatgpt";
+async function getStoredRelaySettings() {
+  const stored = await chrome.storage.sync.get({
+    provider: "chatgpt",
+    uploadTarget: "new",
+    includePrompt: true,
+    autoSendPrompt: false,
+    reviewPrompt: ""
+  });
+  return {
+    provider: stored.provider || "chatgpt",
+    uploadTarget: stored.uploadTarget || "new",
+    includePrompt: stored.includePrompt === true,
+    autoSendPrompt: stored.autoSendPrompt === true,
+    reviewPrompt: (stored.reviewPrompt || "").trim()
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

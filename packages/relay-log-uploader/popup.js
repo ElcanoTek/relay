@@ -3,10 +3,13 @@ const fileSummary = document.getElementById("fileSummary");
 const uploadBtn = document.getElementById("uploadBtn");
 const statusEl = document.getElementById("status");
 const providerSelect = document.getElementById("providerSelect");
+const uploadTargetSelect = document.getElementById("uploadTarget");
 const includeNonJsonToggle = document.getElementById("includeNonJson");
 const includePromptToggle = document.getElementById("includePrompt");
 const autoSendPromptToggle = document.getElementById("autoSendPrompt");
 const reviewPromptInput = document.getElementById("reviewPrompt");
+const tabWarning = document.getElementById("tabWarning");
+const uploadMode = document.getElementById("uploadMode");
 
 const JSON_EXTENSIONS = [".json", ".jsonl", ".ndjson"];
 const NON_JSON_EXTENSIONS = [".log", ".txt"];
@@ -125,6 +128,8 @@ async function sendMessageToBackground(message) {
 async function loadSettings() {
   const stored = await chrome.storage.sync.get({
     provider: "chatgpt",
+    useCurrentTab: false,
+    uploadTarget: "",
     includeNonJson: false,
     includePrompt: true,
     autoSendPrompt: false,
@@ -139,15 +144,31 @@ async function loadSettings() {
     await chrome.storage.sync.set({ reviewPrompt: DEFAULT_REVIEW_PROMPT });
   }
   providerSelect.value = stored.provider;
+  const legacyUseCurrent = stored.useCurrentTab === true;
+  const normalizedTarget = (stored.uploadTarget || "").trim();
+  const targetValue = normalizedTarget || (legacyUseCurrent ? "recent" : "new");
+  if (targetValue === "new" || targetValue === "recent") {
+    uploadTargetSelect.value = targetValue;
+  } else {
+    uploadTargetSelect.value = "new";
+    await chrome.storage.sync.set({ uploadTarget: "new" });
+  }
   includeNonJsonToggle.checked = stored.includeNonJson;
   includePromptToggle.checked = stored.includePrompt;
-  autoSendPromptToggle.checked = stored.autoSendPrompt;
+  autoSendPromptToggle.checked = stored.includePrompt ? stored.autoSendPrompt : false;
+  autoSendPromptToggle.disabled = !stored.includePrompt;
   reviewPromptInput.value = stored.reviewPrompt || DEFAULT_REVIEW_PROMPT;
+  if (!stored.includePrompt && stored.autoSendPrompt) {
+    await chrome.storage.sync.set({ autoSendPrompt: false });
+  }
+  await updateCurrentTabState();
 }
 
 async function saveSettings() {
   await chrome.storage.sync.set({
     provider: providerSelect.value,
+    uploadTarget: uploadTargetSelect.value,
+    useCurrentTab: false,
     includeNonJson: includeNonJsonToggle.checked,
     includePrompt: includePromptToggle.checked,
     autoSendPrompt: autoSendPromptToggle.checked,
@@ -160,6 +181,12 @@ providerSelect.addEventListener("change", async () => {
   setStatus("");
 });
 
+uploadTargetSelect.addEventListener("change", async () => {
+  await saveSettings();
+  setStatus("");
+  await updateCurrentTabState();
+});
+
 includeNonJsonToggle.addEventListener("change", async () => {
   await saveSettings();
   setStatus("");
@@ -167,6 +194,12 @@ includeNonJsonToggle.addEventListener("change", async () => {
 });
 
 includePromptToggle.addEventListener("change", async () => {
+  if (!includePromptToggle.checked) {
+    autoSendPromptToggle.checked = false;
+    autoSendPromptToggle.disabled = true;
+  } else {
+    autoSendPromptToggle.disabled = false;
+  }
   await saveSettings();
   setStatus("");
 });
@@ -180,6 +213,62 @@ reviewPromptInput.addEventListener("input", async () => {
   await saveSettings();
 });
 
+function providerFromUrl(url) {
+  if (!url) return null;
+  try {
+    const { hostname } = new URL(url);
+    if (hostname.includes("gemini.google.com")) return "gemini";
+    if (hostname.includes("claude.ai")) return "claude";
+    if (hostname.includes("chatgpt.com") || hostname.includes("chat.openai.com")) return "chatgpt";
+    return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function setTabWarning(message) {
+  if (!tabWarning) return;
+  if (message) {
+    tabWarning.textContent = message;
+    tabWarning.hidden = false;
+  } else {
+    tabWarning.hidden = true;
+  }
+}
+
+function updateUploadModeText() {
+  if (!uploadMode) return;
+  const target = uploadTargetSelect.value;
+  if (target === "recent") {
+    uploadMode.textContent = "Uses the most recent provider tab.";
+    return;
+  }
+  uploadMode.textContent = "Opens a new chat for upload.";
+}
+
+async function updateCurrentTabState() {
+  const target = uploadTargetSelect.value;
+  const useRecent = target === "recent";
+  providerSelect.disabled = useRecent;
+  updateUploadModeText();
+  if (!useRecent) {
+    setTabWarning("");
+    return;
+  }
+
+  const tabs = await chrome.tabs.query({});
+  const providerTabs = tabs
+    .map((tab) => ({ tab, provider: providerFromUrl(tab.url) }))
+    .filter((entry) => entry.provider);
+  if (providerTabs.length === 0) {
+    setTabWarning("No provider tab found. A new chat will be opened.");
+    return;
+  }
+  providerTabs.sort((a, b) => (b.tab.lastAccessed || 0) - (a.tab.lastAccessed || 0));
+  providerSelect.value = providerTabs[0].provider;
+  setTabWarning("");
+}
+
 
 logFilesInput.addEventListener("change", () => {
   rawSelectedFiles = Array.from(logFilesInput.files || []);
@@ -189,22 +278,27 @@ logFilesInput.addEventListener("change", () => {
 
 uploadBtn.addEventListener("click", async () => {
   try {
+    await saveSettings();
     setStatus("Preparing files…");
     const payload = await readFilesAsPayload();
     setStatus("Opening provider…");
 
     const rawPrompt = (reviewPromptInput.value || "").trim();
-    const shouldIncludePrompt = includePromptToggle.checked || rawPrompt.length > 0;
-    const promptText = shouldIncludePrompt
-      ? rawPrompt || DEFAULT_REVIEW_PROMPT
-      : "";
+    const shouldIncludePrompt = includePromptToggle.checked;
+    const promptText = shouldIncludePrompt ? rawPrompt || DEFAULT_REVIEW_PROMPT : "";
+    const uploadTarget = uploadTargetSelect.value === "recent" ? "recent" : "new";
 
+    const focusTab = uploadTarget !== "new" || shouldIncludePrompt || autoSendPromptToggle.checked;
     const result = await sendMessageToBackground({
       type: "OPEN_AND_UPLOAD",
       files: payload,
       provider: providerSelect.value,
+      uploadTarget,
+      reuseRecentTab: uploadTarget === "recent",
+      focusTab,
+      skipPrompt: !shouldIncludePrompt,
       prompt: promptText,
-      autoSendPrompt: autoSendPromptToggle.checked,
+      autoSendPrompt: shouldIncludePrompt && autoSendPromptToggle.checked,
       includePrompt: shouldIncludePrompt
     });
 

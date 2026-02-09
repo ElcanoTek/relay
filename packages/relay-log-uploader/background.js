@@ -4,6 +4,18 @@
   claude: "https://claude.ai/new"
 };
 
+function isProviderUrl(url, providerKey) {
+  if (!url) return false;
+  try {
+    const { hostname } = new URL(url);
+    if (providerKey === "gemini") return hostname.includes("gemini.google.com");
+    if (providerKey === "claude") return hostname.includes("claude.ai");
+    return hostname.includes("chatgpt.com") || hostname.includes("chat.openai.com");
+  } catch (_error) {
+    return false;
+  }
+}
+
 function waitForTabComplete(tabId) {
   return new Promise((resolve) => {
     const listener = (updatedTabId, info) => {
@@ -21,6 +33,57 @@ async function openProviderTab(providerKey) {
   const tab = await chrome.tabs.create({ url, active: true });
   await waitForTabComplete(tab.id);
   return tab;
+}
+
+async function getActiveTab() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs[0] || null;
+}
+
+async function findMostRecentProviderTab(providerKey) {
+  const tabs = await chrome.tabs.query({});
+  const matches = tabs.filter((tab) => isProviderUrl(tab.url, providerKey));
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+  return matches[0];
+}
+
+async function resolveTargetTab(providerKey, useCurrentTab, reuseRecentTab) {
+  if (useCurrentTab) {
+    const activeTab = await getActiveTab();
+    if (!activeTab?.id) {
+      throw new Error("No active tab found.");
+    }
+    if (!isProviderUrl(activeTab.url, providerKey)) {
+      throw new Error("Active tab does not match the selected provider.");
+    }
+    if (activeTab.status !== "complete") {
+      await waitForTabComplete(activeTab.id);
+    }
+    return { tab: activeTab, openedNew: false };
+  }
+
+  if (reuseRecentTab) {
+    const recentTab = await findMostRecentProviderTab(providerKey);
+    if (recentTab?.id) {
+      if (recentTab.status !== "complete") {
+        await waitForTabComplete(recentTab.id);
+      }
+      return { tab: recentTab, openedNew: false };
+    }
+  }
+
+  const tab = await openProviderTab(providerKey);
+  return { tab, openedNew: true };
+}
+
+async function focusTab(tab) {
+  if (!tab?.id) return;
+  const windowId = tab.windowId;
+  if (typeof windowId === "number") {
+    await chrome.windows.update(windowId, { focused: true });
+  }
+  await chrome.tabs.update(tab.id, { active: true });
 }
 
 function mocHook() {
@@ -178,12 +241,36 @@ async function sendFilesToTab(tabId, files, provider) {
   return chrome.tabs.sendMessage(tabId, message);
 }
 
+async function sendPingToTab(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: "PING" }, (resp) => {
+      if (chrome.runtime.lastError) {
+        resolve(false);
+        return;
+      }
+      resolve(Boolean(resp?.ok));
+    });
+  });
+}
+
+async function ensureContentScript(tabId) {
+  const ok = await sendPingToTab(tabId);
+  if (ok) return true;
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["content-script.js"]
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  return sendPingToTab(tabId);
+}
+
 async function retrySendFiles(tabId, files, provider) {
   const timeoutMs = provider === "gemini" ? 20000 : 12000;
   const start = Date.now();
   let lastError = "No frame handled the upload.";
 
   while (Date.now() - start < timeoutMs) {
+    await ensureContentScript(tabId);
     const result = await sendFilesToTab(tabId, files, provider);
     if (result?.ok) {
       return result;
@@ -414,6 +501,7 @@ async function retrySendPrompt(tabId, prompt, autoSend) {
   const timeoutMs = 15000;
   let lastError = "Prompt insert failed.";
   while (Date.now() - start < timeoutMs) {
+    await ensureContentScript(tabId);
     const result = await sendPromptToTab(tabId, prompt, autoSend);
     if (result?.ok) {
       return result;
@@ -431,22 +519,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "OPEN_AND_UPLOAD") {
     const files = message.files || [];
     const provider = message.provider || "chatgpt";
+    const uploadTarget = (message.uploadTarget || "").toLowerCase();
     const prompt = message.prompt || "";
     const autoSendPrompt = message.autoSendPrompt === true;
     const includePrompt = message.includePrompt === true;
+    const hasPromptOverride = Object.prototype.hasOwnProperty.call(message, "includePrompt");
+    let useCurrentTab = message.useCurrentTab === true;
+    let reuseRecentTab = message.reuseRecentTab === true;
+    const focusTabRequested = message.focusTab === true;
+    const skipPrompt = message.skipPrompt === true || includePrompt === false;
+
+    if (uploadTarget === "new") {
+      useCurrentTab = false;
+      reuseRecentTab = false;
+    } else if (uploadTarget === "recent") {
+      useCurrentTab = false;
+      reuseRecentTab = true;
+    }
 
     (async () => {
       try {
-        const tab = await openProviderTab(provider);
-        const result = await retrySendFiles(tab.id, files, provider);
-        const promptSettings = prompt
-          ? { prompt, autoSendPrompt, includePrompt }
-          : await loadPromptSettings();
-        if (promptSettings.prompt) {
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-          await retrySendPrompt(tab.id, promptSettings.prompt, promptSettings.autoSendPrompt);
+        const { tab, openedNew } = await resolveTargetTab(provider, useCurrentTab, reuseRecentTab);
+        if (focusTabRequested) {
+          await focusTab(tab);
         }
-        sendResponse({ ok: true, result });
+        const result = await retrySendFiles(tab.id, files, provider);
+        if (!skipPrompt) {
+          const promptSettings = hasPromptOverride
+            ? { prompt: includePrompt ? prompt : "", autoSendPrompt: includePrompt ? autoSendPrompt : false, includePrompt }
+            : prompt
+              ? { prompt, autoSendPrompt: includePrompt ? autoSendPrompt : false, includePrompt }
+              : await loadPromptSettings();
+          if (promptSettings.prompt && promptSettings.includePrompt !== false) {
+            const delayMs = openedNew ? 3000 : 1500;
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            await retrySendPrompt(tab.id, promptSettings.prompt, promptSettings.autoSendPrompt);
+          }
+        }
+        sendResponse({ ok: true, result, openedNew });
       } catch (error) {
         sendResponse({ ok: false, error: error.message || "Failed to open provider." });
       }
@@ -457,26 +567,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "OPEN_AND_UPLOAD_FROM_URL") {
     const provider = message.provider || "chatgpt";
     const url = message.url;
+    const uploadTarget = (message.uploadTarget || "").toLowerCase();
     const overridePrompt = (message.prompt || "").trim();
     const overrideAutoSend = message.autoSendPrompt === true;
+    let useCurrentTab = message.useCurrentTab === true;
+    let reuseRecentTab = message.reuseRecentTab === true;
+    const focusTabRequested = message.focusTab === true;
+    const skipPrompt = message.skipPrompt === true || message.includePrompt === false;
     if (!url) {
       sendResponse({ ok: false, error: "No URL provided." });
       return true;
     }
 
+    if (uploadTarget === "new") {
+      useCurrentTab = false;
+      reuseRecentTab = false;
+    } else if (uploadTarget === "recent") {
+      useCurrentTab = false;
+      reuseRecentTab = true;
+    }
+
     (async () => {
       try {
         const files = await fetchFileAsPayload(url);
-        const promptSettings = overridePrompt
-          ? { prompt: overridePrompt, autoSendPrompt: overrideAutoSend, includePrompt: true }
-          : await loadPromptSettings();
-        const tab = await openProviderTab(provider);
+        const promptSettings = skipPrompt
+          ? { prompt: "", autoSendPrompt: false, includePrompt: false }
+          : overridePrompt
+            ? { prompt: overridePrompt, autoSendPrompt: overrideAutoSend, includePrompt: true }
+            : await loadPromptSettings();
+        const { tab, openedNew } = await resolveTargetTab(provider, useCurrentTab, reuseRecentTab);
+        if (focusTabRequested) {
+          await focusTab(tab);
+        }
         const result = await retrySendFiles(tab.id, files, provider);
         if (promptSettings.prompt) {
           await new Promise((resolve) => setTimeout(resolve, 1500));
           await retrySendPrompt(tab.id, promptSettings.prompt, promptSettings.autoSendPrompt);
         }
-        sendResponse({ ok: true, result });
+        sendResponse({ ok: true, result, openedNew });
       } catch (error) {
         sendResponse({ ok: false, error: error.message || "Failed to fetch URL." });
       }

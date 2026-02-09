@@ -24,6 +24,16 @@
             <option value="claude">Claude</option>
           </select>
         </label>
+        <label class="field">
+          <span class="field__label">Upload Target</span>
+          <select id="uploadTarget" class="field__control">
+            <option value="new">New chat</option>
+            <option value="recent">Most recent provider tab</option>
+          </select>
+        </label>
+        <div id="tabWarning" class="warning" hidden>
+          Active tab is not a supported provider. Open ChatGPT, Gemini, or Claude first.
+        </div>
 
         <label class="file-picker">
           <input id="logFiles" type="file" accept=".json,.jsonl,.ndjson,.log,.txt" multiple />
@@ -49,7 +59,8 @@
         </details>
 
         <div class="actions">
-          <button id="uploadBtn" class="primary" disabled>Open new chat + upload</button>
+          <button id="uploadBtn" class="primary" disabled>Upload logs</button>
+          <div id="uploadMode" class="muted">Opens a new chat for upload.</div>
         </div>
       </section>
 
