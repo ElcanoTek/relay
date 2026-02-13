@@ -1,0 +1,40 @@
+﻿{
+  "manifest_version": 3,
+  "name": "Relay Log Uploader",
+  "version": "0.1.0",
+  "description": "Upload local JSON logs to ChatGPT, Gemini, or Claude.",
+  "action": {
+    "default_title": "Relay Log Uploader",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*",
+    "https://moc.elcanotek.com/*"
+  ],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "webNavigation",
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://moc.elcanotek.com/*"
+      ],
+      "js": ["content-script.js"],
+      "all_frames": true
+    }
+  ]
+}
